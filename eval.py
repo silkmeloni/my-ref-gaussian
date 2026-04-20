@@ -59,7 +59,18 @@ def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt
     psnr_v = np.array(psnrs).mean()
     lpip_v = np.array(lpipss).mean()
     fps = 1.0 / np.array(render_times).mean()
-    print('psnr:{}, ssim:{}, lpips:{}, fps:{}'.format(psnr_v, ssim_v, lpip_v, fps))
+    result_text = (
+        f"PSNR: {psnr_v:.6f}\n"
+        f"SSIM: {ssim_v:.6f}\n"
+        f"LPIPS: {lpip_v:.6f}\n"
+        f"FPS: {fps:.6f}\n"
+    )
+    print(result_text.strip())
+    result_path = os.path.join(model_path, 'result.txt')
+    with open(result_path, 'w') as f:
+        f.write(result_text)
+
+    # Keep the original filename for compatibility with existing scripts.
     dump_path = os.path.join(model_path, 'metric.txt')
     with open(dump_path, 'w') as f:
         f.write('psnr:{}, ssim:{}, lpips:{}, fps:{}'.format(psnr_v, ssim_v, lpip_v, fps))
@@ -134,6 +145,7 @@ if __name__ == "__main__":
     pipeline = PipelineParams(parser)
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--save_images", action="store_true")
+    parser.add_argument("--no_indirect", action="store_true", help="Disable mesh-based indirect lighting during evaluation.")
     parser.add_argument("--quiet", action="store_true")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
@@ -141,4 +153,4 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images, op, True)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images, op, not args.no_indirect)
