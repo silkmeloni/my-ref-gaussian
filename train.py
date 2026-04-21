@@ -79,6 +79,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_normal_for_log = 0.0
     ema_normal_smooth_for_log = 0.0
     ema_depth_smooth_for_log = 0.0
+    ema_mono_depth_for_log = 0.0
+    ema_mono_normal_for_log = 0.0
     ema_psnr_for_log = 0.0
     psnr_test = 0
 
@@ -143,6 +145,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         total_loss, tb_dict = calculate_loss(viewpoint_cam, gaussians, render_pkg, opt, iteration)
         dist_loss, normal_loss, loss, Ll1, normal_smooth_loss, depth_smooth_loss = tb_dict["loss_dist"], tb_dict["loss_normal_render_depth"], tb_dict["loss0"], tb_dict["loss_l1"], tb_dict["loss_normal_smooth"], tb_dict["loss_depth_smooth"] 
+        mono_depth_loss, mono_normal_loss = tb_dict["loss_mono_depth"], tb_dict["loss_mono_normal"]
 
         def get_outside_msk():
             return None if not USE_ENV_SCOPE else torch.sum((gaussians.get_xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
@@ -167,6 +170,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_normal_for_log = 0.4 * normal_loss + 0.6 * ema_normal_for_log
             ema_normal_smooth_for_log = 0.4 * normal_smooth_loss + 0.6 * ema_normal_smooth_for_log
             ema_depth_smooth_for_log = 0.4 * depth_smooth_loss + 0.6 * ema_depth_smooth_for_log
+            ema_mono_depth_for_log = 0.4 * mono_depth_loss + 0.6 * ema_mono_depth_for_log
+            ema_mono_normal_for_log = 0.4 * mono_normal_loss + 0.6 * ema_mono_normal_for_log
             ema_psnr_for_log = 0.4 * psnr(image, gt_image).mean().double().item() + 0.6 * ema_psnr_for_log
             if iteration % TEST_INTERVAL == 0:
                 psnr_test = evaluate_psnr(scene, render, {"pipe": pipe, "bg_color": background, "opt": opt})
@@ -179,6 +184,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "PSNR-train": f"{ema_psnr_for_log:.{4}f}",
                     "PSNR-test": f"{psnr_test:.{4}f}"
                 }
+                if opt.lambda_mono_depth > 0:
+                    loss_dict["MonoD"] = f"{ema_mono_depth_for_log:.{5}f}"
+                if opt.lambda_mono_normal > 0:
+                    loss_dict["MonoN"] = f"{ema_mono_normal_for_log:.{5}f}"
                 progress_bar.set_postfix(loss_dict)
                 progress_bar.update(10)
             if iteration == TOT_ITER:
@@ -187,6 +196,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if tb_writer:
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
+
+            if opt.mono_debug and opt.mono_debug_interval > 0 and (
+                    iteration % opt.mono_debug_interval == 0 or iteration == first_iter + 1):
+                save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                             testing_iterations, scene, render, {"pipe": pipe, "bg_color": background, "opt":opt})
@@ -377,6 +392,69 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
             grid = make_grid(grid, nrow=1, padding=10)
             save_image(grid, os.path.join(args.visualize_path, f"{iteration:06d}_env.png"))
 
+def _colorize_scalar_map(value, valid_mask=None):
+    value = value.detach()
+    if valid_mask is None:
+        valid_mask = torch.isfinite(value)
+    else:
+        valid_mask = valid_mask & torch.isfinite(value)
+    if valid_mask.sum().item() > 0:
+        valid_values = value[valid_mask]
+        vmin = valid_values.min()
+        vmax = valid_values.max()
+        value = (value - vmin) / (vmax - vmin).clamp_min(1e-6)
+    else:
+        value = torch.zeros_like(value)
+    value = value.clamp(0.0, 1.0)
+    return value.repeat(3, 1, 1)
+
+def _normalize_for_debug(value, valid_mask):
+    value = value.detach()
+    valid_mask = valid_mask & torch.isfinite(value)
+    if valid_mask.sum().item() == 0:
+        return torch.zeros_like(value)
+    valid_values = value[valid_mask]
+    center = valid_values.median()
+    scale = (valid_values - center).abs().mean().clamp_min(1e-6)
+    return (value - center) / scale
+
+def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
+    has_depth = getattr(viewpoint_cam, "mono_depth", None) is not None
+    has_normal = getattr(viewpoint_cam, "mono_normal", None) is not None
+    if not has_depth and not has_normal:
+        return
+
+    alpha = render_pkg["rend_alpha"].detach()
+    valid = alpha > opt.mono_prior_alpha_thr
+    rows = [viewpoint_cam.original_image.cuda()]
+
+    if has_depth:
+        mono_depth = viewpoint_cam.mono_depth.cuda()
+        render_disp = 1.0 / render_pkg["surf_depth"].detach().clamp_min(1e-6)
+        depth_valid = valid & torch.isfinite(mono_depth) & (mono_depth > 0)
+        render_norm = _normalize_for_debug(render_disp, depth_valid)
+        mono_norm = _normalize_for_debug(mono_depth, depth_valid)
+        diff = (render_norm - mono_norm).abs()
+        rows.extend([
+            _colorize_scalar_map(render_disp, depth_valid),
+            _colorize_scalar_map(mono_depth, depth_valid),
+            _colorize_scalar_map(diff, depth_valid),
+        ])
+
+    if has_normal:
+        mono_normal = F.normalize(viewpoint_cam.mono_normal.cuda(), dim=0, eps=1e-6)
+        render_normal = F.normalize(render_pkg["rend_normal"].detach(), dim=0, eps=1e-6)
+        normal_diff = 1.0 - (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+        rows.extend([
+            render_normal * 0.5 + 0.5,
+            mono_normal * 0.5 + 0.5,
+            _colorize_scalar_map(normal_diff, valid),
+        ])
+
+    grid = make_grid(torch.stack(rows, dim=0), nrow=4)
+    os.makedirs(args.mono_debug_path, exist_ok=True)
+    save_image(grid, os.path.join(args.mono_debug_path, f"{iteration:06d}_{viewpoint_cam.image_name}.png"))
+
       
 NORM_CONDITION_OUTSIDE = False
 def prepare_output_and_logger():    
@@ -386,9 +464,13 @@ def prepare_output_and_logger():
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
     args.visualize_path = os.path.join(args.model_path, "visualize")
+    args.mono_debug_path = os.path.join(args.model_path, "prior_debug")
     
     os.makedirs(args.visualize_path, exist_ok=True)
     print("Visualization folder: {}".format(args.visualize_path))
+    if args.mono_debug:
+        os.makedirs(args.mono_debug_path, exist_ok=True)
+        print("Mono prior debug folder: {}".format(args.mono_debug_path))
     
     # Create Tensorboard writer
     tb_writer = None

@@ -61,6 +61,11 @@ class ModelParams(ParamGroup):
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
+        self.mono_depth_dir = ""
+        self.mono_normal_dir = ""
+        self.mono_normal_flip_x = False
+        self.mono_normal_flip_y = False
+        self.mono_normal_flip_z = False
 
         # Device Settings
         self.data_device = "cuda"
@@ -127,6 +132,17 @@ class OptimizationParams(ParamGroup):
         self.lambda_normal_render_depth = 0.05
         self.lambda_normal_smooth = 0.0
         self.lambda_depth_smooth = 0.0
+        self.lambda_mono_depth = 0.0
+        self.lambda_mono_depth_grad = 0.0
+        self.lambda_mono_normal = 0.0
+        self.mono_depth_from_iter = 0
+        self.mono_depth_until_iter = 25000
+        self.mono_normal_from_iter = 0
+        self.mono_normal_until_iter = 25000
+        self.mono_prior_alpha_thr = 0.1
+        self.mono_prior_min_pixels = 32
+        self.mono_debug = False
+        self.mono_debug_interval = 1000
 
 
         # initial values

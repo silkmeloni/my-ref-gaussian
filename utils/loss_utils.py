@@ -79,6 +79,59 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 def first_order_edge_aware_loss(data, img):
     return (spatial_gradient(data[None], order=1)[0].abs() * torch.exp(-spatial_gradient(img[None], order=1)[0].abs())).sum(1).mean()
 
+def _masked_mean(value, mask, fallback):
+    if mask.sum().item() == 0:
+        return torch.zeros_like(fallback)
+    return value[mask].mean()
+
+def _normalize_with_mask(value, mask, min_pixels):
+    if mask.sum().item() < min_pixels:
+        return None
+    valid = value[mask]
+    center = valid.median().detach()
+    scale = (valid - center).abs().mean().detach().clamp_min(1e-6)
+    return (value - center) / scale
+
+def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref):
+    if mono_depth is None:
+        return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
+    mono_depth = mono_depth.to(rendered_depth.device)
+    render_disp = 1.0 / rendered_depth.clamp_min(1e-6)
+    valid = torch.isfinite(mono_depth) & torch.isfinite(render_disp) & (mono_depth > 0)
+    valid = valid & (opacity.detach() > opt.mono_prior_alpha_thr)
+    render_disp_norm = _normalize_with_mask(render_disp, valid, opt.mono_prior_min_pixels)
+    mono_disp_norm = _normalize_with_mask(mono_depth, valid, opt.mono_prior_min_pixels)
+    if render_disp_norm is None or mono_disp_norm is None:
+        return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
+    depth_loss = (render_disp_norm - mono_disp_norm).abs()[valid].mean()
+
+    grad_loss = torch.zeros_like(loss_ref)
+    if opt.lambda_mono_depth_grad > 0:
+        render_dx = render_disp_norm[:, :, 1:] - render_disp_norm[:, :, :-1]
+        mono_dx = mono_disp_norm[:, :, 1:] - mono_disp_norm[:, :, :-1]
+        mask_dx = valid[:, :, 1:] & valid[:, :, :-1]
+        render_dy = render_disp_norm[:, 1:, :] - render_disp_norm[:, :-1, :]
+        mono_dy = mono_disp_norm[:, 1:, :] - mono_disp_norm[:, :-1, :]
+        mask_dy = valid[:, 1:, :] & valid[:, :-1, :]
+        grad_terms = []
+        if mask_dx.sum().item() >= opt.mono_prior_min_pixels:
+            grad_terms.append((render_dx - mono_dx).abs()[mask_dx].mean())
+        if mask_dy.sum().item() >= opt.mono_prior_min_pixels:
+            grad_terms.append((render_dy - mono_dy).abs()[mask_dy].mean())
+        if grad_terms:
+            grad_loss = sum(grad_terms) / len(grad_terms)
+    return depth_loss, grad_loss
+
+def _mono_normal_loss(rendered_normal, mono_normal, opacity, opt, loss_ref):
+    if mono_normal is None:
+        return torch.zeros_like(loss_ref)
+    mono_normal = mono_normal.to(rendered_normal.device)
+    render_normal = F.normalize(rendered_normal, dim=0, eps=1e-6)
+    mono_normal = F.normalize(mono_normal, dim=0, eps=1e-6)
+    cosine = (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+    valid = torch.isfinite(cosine) & (opacity.detach() > opt.mono_prior_alpha_thr)
+    return _masked_mean(1.0 - cosine, valid, loss_ref)
+
 
 
 def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
@@ -135,6 +188,38 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
         loss = loss + lambda_depth_smooth * loss_depth_smooth
     else:
         tb_dict["loss_depth_smooth"] = torch.zeros_like(loss)
+
+    use_mono_depth = (
+        opt.lambda_mono_depth > 0
+        and opt.mono_depth_from_iter <= iteration < opt.mono_depth_until_iter
+        and hasattr(viewpoint_camera, "mono_depth")
+    )
+    if use_mono_depth:
+        loss_mono_depth, loss_mono_depth_grad = _mono_depth_loss(
+            rendered_depth, viewpoint_camera.mono_depth, rendered_opacity, opt, loss
+        )
+        loss = loss + opt.lambda_mono_depth * loss_mono_depth
+        if opt.lambda_mono_depth_grad > 0:
+            loss = loss + opt.lambda_mono_depth_grad * loss_mono_depth_grad
+        tb_dict["loss_mono_depth"] = loss_mono_depth
+        tb_dict["loss_mono_depth_grad"] = loss_mono_depth_grad
+    else:
+        tb_dict["loss_mono_depth"] = torch.zeros_like(loss)
+        tb_dict["loss_mono_depth_grad"] = torch.zeros_like(loss)
+
+    use_mono_normal = (
+        opt.lambda_mono_normal > 0
+        and opt.mono_normal_from_iter <= iteration < opt.mono_normal_until_iter
+        and hasattr(viewpoint_camera, "mono_normal")
+    )
+    if use_mono_normal:
+        loss_mono_normal = _mono_normal_loss(
+            rendered_normal, viewpoint_camera.mono_normal, rendered_opacity, opt, loss
+        )
+        loss = loss + opt.lambda_mono_normal * loss_mono_normal
+        tb_dict["loss_mono_normal"] = loss_mono_normal
+    else:
+        tb_dict["loss_mono_normal"] = torch.zeros_like(loss)
 
     
     tb_dict["loss"] = loss.item()
