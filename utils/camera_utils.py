@@ -39,6 +39,23 @@ def _resolve_prior_dir(scene_path, prior_dir):
 
     return scene_prior_dir
 
+_MONO_DEBUG_STATS = {}
+
+def _mono_debug_log(args, prior_type, image_path, prior_dir, prior_path, candidates):
+    if not getattr(args, "mono_debug", False):
+        return
+    stats = _MONO_DEBUG_STATS.setdefault(prior_type, {"loaded": 0, "missing": 0})
+    if prior_path is None:
+        stats["missing"] += 1
+        if stats["missing"] <= 20:
+            print(f"[MonoPrior][missing {prior_type}] image={image_path}")
+            print(f"[MonoPrior][missing {prior_type}] dir={prior_dir}")
+            print(f"[MonoPrior][missing {prior_type}] tried={', '.join(candidates)}")
+    else:
+        stats["loaded"] += 1
+        if stats["loaded"] <= 20:
+            print(f"[MonoPrior][loaded {prior_type}] {prior_path}")
+
 def _prior_name_candidates(scene_path, image_path, image_name):
     candidates = []
     try:
@@ -61,13 +78,15 @@ def _prior_name_candidates(scene_path, image_path, image_name):
 
 def _find_prior_file(scene_path, prior_dir, image_path, image_name, extensions):
     if not prior_dir:
-        return None
+        return None, []
+    tried = []
     for base in _prior_name_candidates(scene_path, image_path, image_name):
         for ext in extensions:
             path = os.path.join(prior_dir, base + ext)
+            tried.append(path)
             if os.path.exists(path):
-                return path
-    return None
+                return path, tried
+    return None, tried
 
 def _resize_single_channel(tensor, resolution):
     tensor = tensor[None]
@@ -76,13 +95,14 @@ def _resize_single_channel(tensor, resolution):
 
 def _load_mono_depth(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_depth_dir)
-    path = _find_prior_file(
+    path, tried = _find_prior_file(
         args.source_path,
         prior_dir,
         cam_info.image_path,
         cam_info.image_name,
         (".npy", ".png")
     )
+    _mono_debug_log(args, "depth", cam_info.image_path, prior_dir, path, tried)
     if path is None:
         return None
     if path.lower().endswith(".npy"):
@@ -114,13 +134,14 @@ def _load_mono_depth(args, cam_info, resolution):
 
 def _load_mono_normal(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_normal_dir)
-    path = _find_prior_file(
+    path, tried = _find_prior_file(
         args.source_path,
         prior_dir,
         cam_info.image_path,
         cam_info.image_name,
         (".png", ".npy")
     )
+    _mono_debug_log(args, "normal", cam_info.image_path, prior_dir, path, tried)
     if path is None:
         return None
     if path.lower().endswith(".npy"):
@@ -213,8 +234,19 @@ def loadCam(args, id, cam_info, resolution_scale):
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []
 
+    if getattr(args, "mono_debug", False):
+        _MONO_DEBUG_STATS.clear()
+
     for id, c in enumerate(cam_infos):
         camera_list.append(loadCam(args, id, c, resolution_scale))
+
+    if getattr(args, "mono_debug", False):
+        for prior_type, stats in _MONO_DEBUG_STATS.items():
+            total = stats["loaded"] + stats["missing"]
+            print(
+                f"[MonoPrior][summary {prior_type}] "
+                f"loaded={stats['loaded']} missing={stats['missing']} total={total}"
+            )
 
     return camera_list
 
