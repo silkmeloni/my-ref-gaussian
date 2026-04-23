@@ -60,6 +60,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     gaussians = GaussianModel(dataset.sh_degree)
     set_gaussian_para(gaussians, opt, vol=(opt.volume_render_until_iter > opt.init_until_iter)) # #
+    dataset.mono_debug = opt.mono_debug
     scene = Scene(dataset, gaussians)  # init all parameters(pos, scale, rot...) from pcds
     gaussians.training_setup(opt)
     if checkpoint:
