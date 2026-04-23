@@ -427,6 +427,8 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
 
     alpha = render_pkg["rend_alpha"].detach()
     valid = alpha > opt.mono_prior_alpha_thr
+    if getattr(viewpoint_cam, "gt_alpha_mask", None) is not None:
+        valid = valid & (viewpoint_cam.gt_alpha_mask.cuda() > opt.mono_prior_alpha_thr)
     rows = [viewpoint_cam.original_image.cuda()]
 
     if has_depth:

@@ -92,13 +92,20 @@ def _normalize_with_mask(value, mask, min_pixels):
     scale = (valid - center).abs().mean().detach().clamp_min(1e-6)
     return (value - center) / scale
 
-def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref):
+def _mono_prior_mask(opacity, opt, gt_alpha_mask=None):
+    valid = opacity.detach() > opt.mono_prior_alpha_thr
+    if gt_alpha_mask is not None:
+        gt_alpha_mask = gt_alpha_mask.to(opacity.device)
+        valid = valid & (gt_alpha_mask > opt.mono_prior_alpha_thr)
+    return valid
+
+def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_depth is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
     mono_depth = mono_depth.to(rendered_depth.device)
     render_disp = 1.0 / rendered_depth.clamp_min(1e-6)
     valid = torch.isfinite(mono_depth) & torch.isfinite(render_disp) & (mono_depth > 0)
-    valid = valid & (opacity.detach() > opt.mono_prior_alpha_thr)
+    valid = valid & _mono_prior_mask(opacity, opt, gt_alpha_mask)
     render_disp_norm = _normalize_with_mask(render_disp, valid, opt.mono_prior_min_pixels)
     mono_disp_norm = _normalize_with_mask(mono_depth, valid, opt.mono_prior_min_pixels)
     if render_disp_norm is None or mono_disp_norm is None:
@@ -122,14 +129,14 @@ def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref):
             grad_loss = sum(grad_terms) / len(grad_terms)
     return depth_loss, grad_loss
 
-def _mono_normal_loss(rendered_normal, mono_normal, opacity, opt, loss_ref):
+def _mono_normal_loss(rendered_normal, mono_normal, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_normal is None:
         return torch.zeros_like(loss_ref)
     mono_normal = mono_normal.to(rendered_normal.device)
     render_normal = F.normalize(rendered_normal, dim=0, eps=1e-6)
     mono_normal = F.normalize(mono_normal, dim=0, eps=1e-6)
     cosine = (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
-    valid = torch.isfinite(cosine) & (opacity.detach() > opt.mono_prior_alpha_thr)
+    valid = torch.isfinite(cosine) & _mono_prior_mask(opacity, opt, gt_alpha_mask)
     return _masked_mean(1.0 - cosine, valid, loss_ref)
 
 
@@ -196,7 +203,8 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     )
     if use_mono_depth:
         loss_mono_depth, loss_mono_depth_grad = _mono_depth_loss(
-            rendered_depth, viewpoint_camera.mono_depth, rendered_opacity, opt, loss
+            rendered_depth, viewpoint_camera.mono_depth, rendered_opacity, opt, loss,
+            getattr(viewpoint_camera, "gt_alpha_mask", None)
         )
         loss = loss + opt.lambda_mono_depth * loss_mono_depth
         if opt.lambda_mono_depth_grad > 0:
@@ -214,7 +222,8 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     )
     if use_mono_normal:
         loss_mono_normal = _mono_normal_loss(
-            rendered_normal, viewpoint_camera.mono_normal, rendered_opacity, opt, loss
+            rendered_normal, viewpoint_camera.mono_normal, rendered_opacity, opt, loss,
+            getattr(viewpoint_camera, "gt_alpha_mask", None)
         )
         loss = loss + opt.lambda_mono_normal * loss_mono_normal
         tb_dict["loss_mono_normal"] = loss_mono_normal

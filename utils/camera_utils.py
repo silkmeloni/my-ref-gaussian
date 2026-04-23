@@ -209,7 +209,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         gt_image = resized_image_rgb
     else:
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
-        loaded_mask = None
+        loaded_mask = PILtoTorch(cam_info.alpha_mask, resolution) if getattr(cam_info, "alpha_mask", None) is not None else None
         gt_image = resized_image_rgb
     # #
     refl_path = os.path.join(

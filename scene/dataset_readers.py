@@ -35,6 +35,7 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    alpha_mask: object = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -126,7 +127,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         K[:2] *=  real_im_scale
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, K=K, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, image_name=image_name, width=width, height=height,
+                              alpha_mask=None)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -245,6 +247,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             norm_data = im_data / 255.0
             arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            alpha_mask = Image.fromarray(np.array(norm_data[:, :, 3] * 255.0, dtype=np.byte), "L")
             image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
             fo = fov2focal(fovx, image.size[0])
 
@@ -261,7 +264,8 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             # For blender datasets, we consider its camera center offset is zero (ideal camera)
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, K=K, FovY=FovY, FovX=FovX, image=image,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1],
+                            alpha_mask=alpha_mask))
             
     return cam_infos
 

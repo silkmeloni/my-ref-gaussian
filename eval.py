@@ -66,9 +66,11 @@ def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt
         f"FPS: {fps:.6f}\n"
     )
     print(result_text.strip())
+    makedirs(model_path, exist_ok=True)
     result_path = os.path.join(model_path, 'result.txt')
     with open(result_path, 'w') as f:
         f.write(result_text)
+    print(f"Saved evaluation results to {result_path}")
 
     # Keep the original filename for compatibility with existing scripts.
     dump_path = os.path.join(model_path, 'metric.txt')
