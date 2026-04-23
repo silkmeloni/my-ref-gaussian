@@ -419,6 +419,15 @@ def _normalize_for_debug(value, valid_mask):
     scale = (valid_values - center).abs().mean().clamp_min(1e-6)
     return (value - center) / scale
 
+def _safe_debug_disparity(depth, valid_mask, opt):
+    valid_depth = depth.detach()[valid_mask & torch.isfinite(depth)]
+    if valid_depth.numel() >= opt.mono_prior_min_pixels:
+        depth_floor = torch.quantile(valid_depth, opt.mono_render_depth_quantile)
+        depth_floor = depth_floor.clamp_min(opt.mono_render_depth_min)
+    else:
+        depth_floor = torch.tensor(opt.mono_render_depth_min, device=depth.device, dtype=depth.dtype)
+    return 1.0 / depth.detach().clamp_min(depth_floor)
+
 def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
     has_depth = getattr(viewpoint_cam, "mono_depth", None) is not None
     has_normal = getattr(viewpoint_cam, "mono_normal", None) is not None
@@ -433,8 +442,10 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
 
     if has_depth:
         mono_depth = viewpoint_cam.mono_depth.cuda()
-        render_disp = 1.0 / render_pkg["surf_depth"].detach().clamp_min(1e-6)
-        depth_valid = valid & torch.isfinite(mono_depth) & (mono_depth > 0)
+        rendered_depth = render_pkg["surf_depth"].detach()
+        depth_valid = valid & torch.isfinite(mono_depth) & torch.isfinite(rendered_depth)
+        depth_valid = depth_valid & (mono_depth > 0) & (rendered_depth > opt.mono_render_depth_min)
+        render_disp = _safe_debug_disparity(rendered_depth, depth_valid, opt)
         render_norm = _normalize_for_debug(render_disp, depth_valid)
         mono_norm = _normalize_for_debug(mono_depth, depth_valid)
         diff = (render_norm - mono_norm).abs()

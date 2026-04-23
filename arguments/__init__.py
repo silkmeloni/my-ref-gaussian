@@ -141,6 +141,8 @@ class OptimizationParams(ParamGroup):
         self.mono_normal_until_iter = 25000
         self.mono_prior_alpha_thr = 0.1
         self.mono_prior_min_pixels = 32
+        self.mono_render_depth_min = 1e-3
+        self.mono_render_depth_quantile = 0.02
         self.mono_debug = False
         self.mono_debug_interval = 1000
 
