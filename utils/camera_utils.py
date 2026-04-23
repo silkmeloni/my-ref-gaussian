@@ -22,15 +22,48 @@ def _resolve_prior_dir(scene_path, prior_dir):
         return ""
     if os.path.isabs(prior_dir):
         return prior_dir
-    return os.path.join(scene_path, prior_dir)
+    scene_prior_dir = os.path.join(scene_path, prior_dir)
+    if os.path.exists(scene_prior_dir):
+        return scene_prior_dir
 
-def _find_prior_file(prior_dir, image_path, image_name):
+    scene_name = os.path.basename(os.path.normpath(scene_path))
+    scene_parent = os.path.dirname(os.path.normpath(scene_path))
+    parent_prior_dir = os.path.join(scene_parent, prior_dir)
+    if os.path.exists(parent_prior_dir):
+        return parent_prior_dir
+
+    full_scene_dir = os.path.join(scene_parent, f"{scene_name}_full")
+    full_prior_dir = os.path.join(full_scene_dir, prior_dir)
+    if os.path.exists(full_prior_dir):
+        return full_prior_dir
+
+    return scene_prior_dir
+
+def _prior_name_candidates(scene_path, image_path, image_name):
+    candidates = []
+    try:
+        rel_path = os.path.relpath(image_path, scene_path)
+        rel_stem = os.path.splitext(rel_path)[0]
+        flat_rel_stem = "_".join(part for part in rel_stem.split(os.sep) if part and part != ".")
+        if flat_rel_stem:
+            candidates.append(flat_rel_stem)
+    except ValueError:
+        pass
+
+    basename_stem = os.path.splitext(os.path.basename(image_path))[0]
+    candidates.extend([image_name, basename_stem])
+
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+    return unique_candidates
+
+def _find_prior_file(scene_path, prior_dir, image_path, image_name, extensions):
     if not prior_dir:
         return None
-    stem = image_name
-    basename_stem = os.path.splitext(os.path.basename(image_path))[0]
-    for base in (stem, basename_stem):
-        for ext in (".npy", ".npz", ".png", ".jpg", ".jpeg", ".exr", ".tiff", ".tif"):
+    for base in _prior_name_candidates(scene_path, image_path, image_name):
+        for ext in extensions:
             path = os.path.join(prior_dir, base + ext)
             if os.path.exists(path):
                 return path
@@ -43,7 +76,13 @@ def _resize_single_channel(tensor, resolution):
 
 def _load_mono_depth(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_depth_dir)
-    path = _find_prior_file(prior_dir, cam_info.image_path, cam_info.image_name)
+    path = _find_prior_file(
+        args.source_path,
+        prior_dir,
+        cam_info.image_path,
+        cam_info.image_name,
+        (".npy", ".png")
+    )
     if path is None:
         return None
     if path.lower().endswith(".npy"):
@@ -75,7 +114,13 @@ def _load_mono_depth(args, cam_info, resolution):
 
 def _load_mono_normal(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_normal_dir)
-    path = _find_prior_file(prior_dir, cam_info.image_path, cam_info.image_name)
+    path = _find_prior_file(
+        args.source_path,
+        prior_dir,
+        cam_info.image_path,
+        cam_info.image_name,
+        (".png", ".npy")
+    )
     if path is None:
         return None
     if path.lower().endswith(".npy"):
