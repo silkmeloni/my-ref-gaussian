@@ -99,23 +99,13 @@ def _mono_prior_mask(opacity, opt, gt_alpha_mask=None):
         valid = valid & (gt_alpha_mask > opt.mono_prior_alpha_thr)
     return valid
 
-def _safe_render_disparity(rendered_depth, valid, opt):
-    valid_depth = rendered_depth.detach()[valid]
-    if valid_depth.numel() >= opt.mono_prior_min_pixels:
-        depth_floor = torch.quantile(valid_depth, opt.mono_render_depth_quantile)
-        depth_floor = depth_floor.clamp_min(opt.mono_render_depth_min)
-    else:
-        depth_floor = torch.tensor(opt.mono_render_depth_min, device=rendered_depth.device, dtype=rendered_depth.dtype)
-    return 1.0 / rendered_depth.clamp_min(depth_floor)
-
 def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_depth is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
     mono_depth = mono_depth.to(rendered_depth.device)
-    valid = torch.isfinite(mono_depth) & torch.isfinite(rendered_depth) & (mono_depth > 0)
-    valid = valid & (rendered_depth.detach() > opt.mono_render_depth_min)
+    render_disp = 1.0 / rendered_depth.clamp_min(1e-6)
+    valid = torch.isfinite(mono_depth) & torch.isfinite(render_disp) & (mono_depth > 0)
     valid = valid & _mono_prior_mask(opacity, opt, gt_alpha_mask)
-    render_disp = _safe_render_disparity(rendered_depth, valid, opt)
     render_disp_norm = _normalize_with_mask(render_disp, valid, opt.mono_prior_min_pixels)
     mono_disp_norm = _normalize_with_mask(mono_depth, valid, opt.mono_prior_min_pixels)
     if render_disp_norm is None or mono_disp_norm is None:

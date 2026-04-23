@@ -409,6 +409,14 @@ def _colorize_scalar_map(value, valid_mask=None):
     value = value.clamp(0.0, 1.0)
     return value.repeat(3, 1, 1)
 
+def _colorize_residual_map(value, valid_mask):
+    residual = _colorize_scalar_map(value, valid_mask)
+    invalid = ~valid_mask
+    residual[0][invalid[0]] = 1.0
+    residual[1][invalid[0]] = 0.0
+    residual[2][invalid[0]] = 0.0
+    return residual
+
 def _normalize_for_debug(value, valid_mask):
     value = value.detach()
     valid_mask = valid_mask & torch.isfinite(value)
@@ -418,15 +426,6 @@ def _normalize_for_debug(value, valid_mask):
     center = valid_values.median()
     scale = (valid_values - center).abs().mean().clamp_min(1e-6)
     return (value - center) / scale
-
-def _safe_debug_disparity(depth, valid_mask, opt):
-    valid_depth = depth.detach()[valid_mask & torch.isfinite(depth)]
-    if valid_depth.numel() >= opt.mono_prior_min_pixels:
-        depth_floor = torch.quantile(valid_depth, opt.mono_render_depth_quantile)
-        depth_floor = depth_floor.clamp_min(opt.mono_render_depth_min)
-    else:
-        depth_floor = torch.tensor(opt.mono_render_depth_min, device=depth.device, dtype=depth.dtype)
-    return 1.0 / depth.detach().clamp_min(depth_floor)
 
 def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
     has_depth = getattr(viewpoint_cam, "mono_depth", None) is not None
@@ -444,15 +443,15 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
         mono_depth = viewpoint_cam.mono_depth.cuda()
         rendered_depth = render_pkg["surf_depth"].detach()
         depth_valid = valid & torch.isfinite(mono_depth) & torch.isfinite(rendered_depth)
-        depth_valid = depth_valid & (mono_depth > 0) & (rendered_depth > opt.mono_render_depth_min)
-        render_disp = _safe_debug_disparity(rendered_depth, depth_valid, opt)
+        depth_valid = depth_valid & (mono_depth > 0)
+        render_disp = 1.0 / rendered_depth.clamp_min(1e-6)
         render_norm = _normalize_for_debug(render_disp, depth_valid)
         mono_norm = _normalize_for_debug(mono_depth, depth_valid)
         diff = (render_norm - mono_norm).abs()
         rows.extend([
             _colorize_scalar_map(render_disp, depth_valid),
             _colorize_scalar_map(mono_depth, depth_valid),
-            _colorize_scalar_map(diff, depth_valid),
+            _colorize_residual_map(diff, depth_valid),
         ])
 
     if has_normal:
@@ -462,7 +461,7 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
         rows.extend([
             render_normal * 0.5 + 0.5,
             mono_normal * 0.5 + 0.5,
-            _colorize_scalar_map(normal_diff, valid),
+            _colorize_residual_map(normal_diff, valid),
         ])
 
     grid = make_grid(torch.stack(rows, dim=0), nrow=4)
