@@ -21,6 +21,7 @@ from utils.general_utils import safe_state
 import numpy as np
 from tqdm import tqdm
 from utils.image_utils import psnr
+from utils.loss_utils import ssim
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from datetime import datetime
@@ -29,6 +30,7 @@ import torch.nn.functional as F
 from utils.image_utils import visualize_depth
 from utils.graphics_utils import linear_to_srgb
 from utils.mesh_utils import GaussianExtractor, post_process_mesh
+from lpipsPyTorch import lpips
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -277,6 +279,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 torch.save((gaussians.capture(), iteration), scene.model_path + f"/chkpnt{iteration}.pth")
 
         iteration += 1
+
+    if dataset.eval:
+        final_initial_stage = False
+        final_render = select_render_method(opt.iterations, opt, final_initial_stage)
+        evaluate_and_save_results(
+            scene,
+            final_render,
+            {"pipe": pipe, "bg_color": background, "opt": opt, "srgb": opt.srgb},
+            model_path,
+        )
 
 
 
@@ -568,6 +580,52 @@ def evaluate_psnr(scene, renderFunc, renderkwargs):
         
     torch.cuda.empty_cache()
     return psnr_test
+
+@torch.no_grad()
+def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path):
+    views = scene.getTestCameras()
+    if not views:
+        print("No test cameras found, skipping final result.txt export.")
+        return
+
+    ssims = []
+    psnrs = []
+    lpipss = []
+    render_times = []
+
+    for view in tqdm(views, desc="Final evaluation"):
+        t1 = datetime.now()
+        render_pkg = renderFunc(view, scene.gaussians, **renderkwargs)
+        render_time = (datetime.now() - t1).total_seconds()
+
+        render_color = torch.clamp(render_pkg["render"], 0.0, 1.0)[None]
+        gt = torch.clamp(view.original_image, 0.0, 1.0)[None, 0:3, :, :]
+
+        ssims.append(ssim(render_color, gt).item())
+        psnrs.append(psnr(render_color, gt).item())
+        lpipss.append(lpips(render_color, gt, net_type='vgg').item())
+        render_times.append(render_time)
+
+    ssim_v = float(np.array(ssims).mean())
+    psnr_v = float(np.array(psnrs).mean())
+    lpip_v = float(np.array(lpipss).mean())
+    fps = float(1.0 / np.array(render_times).mean())
+
+    result_text = (
+        f"PSNR: {psnr_v:.6f}\n"
+        f"SSIM: {ssim_v:.6f}\n"
+        f"LPIPS: {lpip_v:.6f}\n"
+        f"FPS: {fps:.6f}\n"
+    )
+    os.makedirs(model_path, exist_ok=True)
+    result_path = os.path.join(model_path, "result.txt")
+    with open(result_path, "w") as f:
+        f.write(result_text)
+    metric_path = os.path.join(model_path, "metric.txt")
+    with open(metric_path, "w") as f:
+        f.write(f"psnr:{psnr_v}, ssim:{ssim_v}, lpips:{lpip_v}, fps:{fps}")
+    print(result_text.strip())
+    print(f"Saved training-time evaluation results to {result_path}")
 
 
 
