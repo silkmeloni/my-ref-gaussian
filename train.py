@@ -43,6 +43,7 @@ except ImportError:
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, model_path, debug_from=None):
+    training_start_time = datetime.now()
     first_iter = 0
     tb_writer = prepare_output_and_logger()
 
@@ -288,6 +289,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             final_render,
             {"pipe": pipe, "bg_color": background, "opt": opt, "srgb": opt.srgb},
             model_path,
+            (datetime.now() - training_start_time).total_seconds(),
         )
 
 
@@ -582,7 +584,7 @@ def evaluate_psnr(scene, renderFunc, renderkwargs):
     return psnr_test
 
 @torch.no_grad()
-def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path):
+def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path, train_time_seconds=None):
     views = scene.getTestCameras()
     if not views:
         print("No test cameras found, skipping final result.txt export.")
@@ -617,13 +619,18 @@ def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path):
         f"LPIPS: {lpip_v:.6f}\n"
         f"FPS: {fps:.6f}\n"
     )
+    if train_time_seconds is not None:
+        result_text += f"TrainTimeSeconds: {train_time_seconds:.2f}\n"
     os.makedirs(model_path, exist_ok=True)
     result_path = os.path.join(model_path, "result.txt")
     with open(result_path, "w") as f:
         f.write(result_text)
     metric_path = os.path.join(model_path, "metric.txt")
     with open(metric_path, "w") as f:
-        f.write(f"psnr:{psnr_v}, ssim:{ssim_v}, lpips:{lpip_v}, fps:{fps}")
+        metric_text = f"psnr:{psnr_v}, ssim:{ssim_v}, lpips:{lpip_v}, fps:{fps}"
+        if train_time_seconds is not None:
+            metric_text += f", train_time_seconds:{train_time_seconds}"
+        f.write(metric_text)
     print(result_text.strip())
     print(f"Saved training-time evaluation results to {result_path}")
 
