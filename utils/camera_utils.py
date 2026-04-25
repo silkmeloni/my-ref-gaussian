@@ -106,6 +106,11 @@ def _decode_normal_range(normal):
         return normal / 65535.0 * 2.0 - 1.0
     return normal
 
+def _apply_omnidata_to_opencv_axes(normal):
+    normal[1] = -normal[1]
+    normal[2] = -normal[2]
+    return normal
+
 def _load_mono_depth(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_depth_dir)
     path, tried = _find_prior_file(
@@ -175,13 +180,16 @@ def _load_mono_normal(args, cam_info, resolution):
         normal = normal.permute(2, 0, 1)
     if normal.ndim != 3 or normal.shape[0] != 3:
         return None
+    normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-6)
     normal = torch.nn.functional.interpolate(normal[None], size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)[0]
+    normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-6)
     order = getattr(args, "mono_normal_order", "xyz").lower()
     order_map = {"x": 0, "y": 1, "z": 2}
     if len(order) == 3 and sorted(order) == ["x", "y", "z"]:
         normal = normal[[order_map[axis] for axis in order]]
     else:
         print(f"[MonoPrior][warning normal] Invalid mono_normal_order={order}, fallback to xyz")
+    normal = _apply_omnidata_to_opencv_axes(normal)
     if args.mono_normal_flip_x:
         normal[0] = -normal[0]
     if args.mono_normal_flip_y:
