@@ -76,16 +76,17 @@ def _prior_name_candidates(scene_path, image_path, image_name):
             unique_candidates.append(candidate)
     return unique_candidates
 
-def _find_prior_file(scene_path, prior_dir, image_path, image_name, extensions):
+def _find_prior_file(scene_path, prior_dir, image_path, image_name, extensions, suffixes=("",)):
     if not prior_dir:
         return None, []
     tried = []
     for base in _prior_name_candidates(scene_path, image_path, image_name):
-        for ext in extensions:
-            path = os.path.join(prior_dir, base + ext)
-            tried.append(path)
-            if os.path.exists(path):
-                return path, tried
+        for suffix in suffixes:
+            for ext in extensions:
+                path = os.path.join(prior_dir, base + suffix + ext)
+                tried.append(path)
+                if os.path.exists(path):
+                    return path, tried
     return None, tried
 
 def _resize_single_channel(tensor, resolution):
@@ -139,7 +140,8 @@ def _load_mono_normal(args, cam_info, resolution):
         prior_dir,
         cam_info.image_path,
         cam_info.image_name,
-        (".png", ".npy")
+        (".png", ".npy"),
+        ("_normal", "")
     )
     _mono_debug_log(args, "normal", cam_info.image_path, prior_dir, path, tried)
     if path is None:
