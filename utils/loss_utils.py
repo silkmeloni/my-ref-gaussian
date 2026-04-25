@@ -12,7 +12,7 @@
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
-from math import exp
+from math import cos, exp, radians
 from kornia.filters import spatial_gradient
 from .image_utils import psnr
 from utils.image_utils import erode
@@ -146,6 +146,14 @@ def _weighted_masked_mean(value, mask, weights, fallback):
     denom = valid_weights.sum().clamp_min(1e-6)
     return (value[mask] * valid_weights).sum() / denom
 
+def mono_normal_angle_valid(cosine, valid, opt):
+    if not getattr(opt, "mono_normal_angle_mask", False):
+        return valid
+    threshold = float(getattr(opt, "mono_normal_angle_thr", 60.0))
+    threshold = max(0.0, min(180.0, threshold))
+    cos_threshold = cos(radians(threshold))
+    return valid & (cosine.detach() >= cos_threshold)
+
 def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_depth is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
@@ -187,6 +195,7 @@ def _mono_normal_loss(rendered_normal, mono_normal, opacity, opt, loss_ref, gt_a
     mono_normal = F.normalize(mono_normal, dim=0, eps=1e-6)
     cosine = (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
     valid = torch.isfinite(cosine) & _mono_prior_mask(opacity, opt, gt_alpha_mask)
+    valid = mono_normal_angle_valid(cosine, valid, opt)
     return _masked_mean(1.0 - cosine, valid, loss_ref)
 
 

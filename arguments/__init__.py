@@ -145,6 +145,8 @@ class OptimizationParams(ParamGroup):
         self.mono_depth_edge_mask = False
         self.mono_depth_edge_mask_min_weight = 0.25
         self.mono_depth_edge_mask_sigma = 1.0
+        self.mono_normal_angle_mask = False
+        self.mono_normal_angle_thr = 60.0
         self.mono_debug = False
         self.mono_debug_interval = 1000
 

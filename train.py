@@ -14,7 +14,7 @@ import torch
 import open3d as o3d
 import shlex
 from random import randint
-from utils.loss_utils import calculate_loss, l1_loss, mono_depth_edge_weights
+from utils.loss_utils import calculate_loss, l1_loss, mono_depth_edge_weights, mono_normal_angle_valid
 from gaussian_renderer import render_surfel, render_initial, render_volume, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -522,8 +522,11 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
     if has_normal:
         mono_normal = F.normalize(viewpoint_cam.mono_normal.cuda(), dim=0, eps=1e-6)
         render_normal = F.normalize(render_pkg["rend_normal"].detach(), dim=0, eps=1e-6)
-        normal_diff = 1.0 - (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
-        best = _suggest_normal_transform(render_normal, mono_normal, valid)
+        normal_cosine = (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+        normal_valid = valid & torch.isfinite(normal_cosine)
+        normal_valid = mono_normal_angle_valid(normal_cosine, normal_valid, opt)
+        normal_diff = 1.0 - normal_cosine
+        best = _suggest_normal_transform(render_normal, mono_normal, normal_valid)
         if best is not None:
             loss, order, flips = best
             flip_args = []
@@ -538,7 +541,7 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
         rows.extend([
             render_normal * 0.5 + 0.5,
             mono_normal * 0.5 + 0.5,
-            _colorize_residual_map(normal_diff, valid),
+            _colorize_residual_map(normal_diff, normal_valid),
         ])
 
     grid = make_grid(torch.stack(rows, dim=0), nrow=4)
