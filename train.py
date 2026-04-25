@@ -14,7 +14,7 @@ import torch
 import open3d as o3d
 import shlex
 from random import randint
-from utils.loss_utils import calculate_loss, l1_loss
+from utils.loss_utils import calculate_loss, l1_loss, mono_depth_edge_weights
 from gaussian_renderer import render_surfel, render_initial, render_volume, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -433,6 +433,14 @@ def _colorize_residual_map(value, valid_mask):
     residual[2][invalid[0]] = 0.0
     return residual
 
+def _visualize_weight_map(weights, valid_mask):
+    weights = weights.detach().clamp(0.0, 1.0).repeat(3, 1, 1)
+    invalid = ~valid_mask
+    weights[0][invalid[0]] = 1.0
+    weights[1][invalid[0]] = 0.0
+    weights[2][invalid[0]] = 0.0
+    return weights
+
 def _suggest_normal_transform(render_normal, mono_normal, valid_mask):
     perms = {
         "xyz": [0, 1, 2],
@@ -501,11 +509,15 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
         render_norm = _normalize_for_debug(render_disp, depth_valid)
         mono_norm = _normalize_for_debug(mono_depth, depth_valid)
         diff = (render_norm - mono_norm).abs()
-        rows.extend([
+        depth_rows = [
             _colorize_scalar_map(render_disp, depth_valid),
             _colorize_scalar_map(mono_depth, depth_valid),
             _colorize_residual_map(diff, depth_valid),
-        ])
+        ]
+        if opt.mono_depth_edge_mask:
+            edge_weights = mono_depth_edge_weights(mono_norm, depth_valid, opt)
+            depth_rows.append(_visualize_weight_map(edge_weights, depth_valid))
+        rows.extend(depth_rows)
 
     if has_normal:
         mono_normal = F.normalize(viewpoint_cam.mono_normal.cuda(), dim=0, eps=1e-6)

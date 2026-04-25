@@ -142,6 +142,9 @@ class OptimizationParams(ParamGroup):
         self.mono_normal_until_iter = 25000
         self.mono_prior_alpha_thr = 0.1
         self.mono_prior_min_pixels = 32
+        self.mono_depth_edge_mask = False
+        self.mono_depth_edge_mask_min_weight = 0.25
+        self.mono_depth_edge_mask_sigma = 1.0
         self.mono_debug = False
         self.mono_debug_interval = 1000
 

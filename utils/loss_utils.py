@@ -99,6 +99,53 @@ def _mono_prior_mask(opacity, opt, gt_alpha_mask=None):
         valid = valid & (gt_alpha_mask > opt.mono_prior_alpha_thr)
     return valid
 
+def mono_depth_edge_weights(mono_disp_norm, valid, opt):
+    if not getattr(opt, "mono_depth_edge_mask", False):
+        return torch.ones_like(mono_disp_norm)
+
+    min_weight = float(getattr(opt, "mono_depth_edge_mask_min_weight", 0.25))
+    min_weight = max(0.0, min(1.0, min_weight))
+    sigma = float(getattr(opt, "mono_depth_edge_mask_sigma", 1.0))
+    sigma = max(1e-6, sigma)
+
+    mono_disp_norm = mono_disp_norm.detach()
+    valid = valid.detach()
+    edge = torch.zeros_like(mono_disp_norm)
+    count = torch.zeros_like(mono_disp_norm)
+
+    dx = (mono_disp_norm[:, :, 1:] - mono_disp_norm[:, :, :-1]).abs()
+    mask_dx = valid[:, :, 1:] & valid[:, :, :-1]
+    dx = dx * mask_dx.float()
+    edge[:, :, 1:] += dx
+    edge[:, :, :-1] += dx
+    count[:, :, 1:] += mask_dx.float()
+    count[:, :, :-1] += mask_dx.float()
+
+    dy = (mono_disp_norm[:, 1:, :] - mono_disp_norm[:, :-1, :]).abs()
+    mask_dy = valid[:, 1:, :] & valid[:, :-1, :]
+    dy = dy * mask_dy.float()
+    edge[:, 1:, :] += dy
+    edge[:, :-1, :] += dy
+    count[:, 1:, :] += mask_dy.float()
+    count[:, :-1, :] += mask_dy.float()
+
+    edge = edge / count.clamp_min(1.0)
+    if valid.sum().item() < getattr(opt, "mono_prior_min_pixels", 32):
+        return torch.ones_like(mono_disp_norm)
+
+    edge_valid = edge[valid]
+    edge_scale = torch.quantile(edge_valid, 0.90).detach().clamp_min(1e-6)
+    edge_score = edge / edge_scale
+    weights = min_weight + (1.0 - min_weight) * torch.exp(-edge_score / sigma)
+    return weights.clamp(min_weight, 1.0)
+
+def _weighted_masked_mean(value, mask, weights, fallback):
+    if mask.sum().item() == 0:
+        return torch.zeros_like(fallback)
+    valid_weights = weights[mask]
+    denom = valid_weights.sum().clamp_min(1e-6)
+    return (value[mask] * valid_weights).sum() / denom
+
 def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_depth is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
@@ -110,21 +157,24 @@ def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alph
     mono_disp_norm = _normalize_with_mask(mono_depth, valid, opt.mono_prior_min_pixels)
     if render_disp_norm is None or mono_disp_norm is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
-    depth_loss = (render_disp_norm - mono_disp_norm).abs()[valid].mean()
+    depth_weights = mono_depth_edge_weights(mono_disp_norm, valid, opt)
+    depth_loss = _weighted_masked_mean((render_disp_norm - mono_disp_norm).abs(), valid, depth_weights, loss_ref)
 
     grad_loss = torch.zeros_like(loss_ref)
     if opt.lambda_mono_depth_grad > 0:
         render_dx = render_disp_norm[:, :, 1:] - render_disp_norm[:, :, :-1]
         mono_dx = mono_disp_norm[:, :, 1:] - mono_disp_norm[:, :, :-1]
         mask_dx = valid[:, :, 1:] & valid[:, :, :-1]
+        weight_dx = 0.5 * (depth_weights[:, :, 1:] + depth_weights[:, :, :-1])
         render_dy = render_disp_norm[:, 1:, :] - render_disp_norm[:, :-1, :]
         mono_dy = mono_disp_norm[:, 1:, :] - mono_disp_norm[:, :-1, :]
         mask_dy = valid[:, 1:, :] & valid[:, :-1, :]
+        weight_dy = 0.5 * (depth_weights[:, 1:, :] + depth_weights[:, :-1, :])
         grad_terms = []
         if mask_dx.sum().item() >= opt.mono_prior_min_pixels:
-            grad_terms.append((render_dx - mono_dx).abs()[mask_dx].mean())
+            grad_terms.append(_weighted_masked_mean((render_dx - mono_dx).abs(), mask_dx, weight_dx, loss_ref))
         if mask_dy.sum().item() >= opt.mono_prior_min_pixels:
-            grad_terms.append((render_dy - mono_dy).abs()[mask_dy].mean())
+            grad_terms.append(_weighted_masked_mean((render_dy - mono_dy).abs(), mask_dy, weight_dy, loss_ref))
         if grad_terms:
             grad_loss = sum(grad_terms) / len(grad_terms)
     return depth_loss, grad_loss
