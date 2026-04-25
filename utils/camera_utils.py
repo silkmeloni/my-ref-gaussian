@@ -94,6 +94,18 @@ def _resize_single_channel(tensor, resolution):
     tensor = torch.nn.functional.interpolate(tensor, size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)
     return tensor[0]
 
+def _decode_normal_range(normal):
+    normal = np.nan_to_num(normal.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    normal_min = float(normal.min())
+    normal_max = float(normal.max())
+    if normal_min >= 0.0 and normal_max <= 1.0:
+        return normal * 2.0 - 1.0
+    if normal_min >= 0.0 and normal_max <= 255.0:
+        return normal / 255.0 * 2.0 - 1.0
+    if normal_min >= 0.0 and normal_max <= 65535.0:
+        return normal / 65535.0 * 2.0 - 1.0
+    return normal
+
 def _load_mono_depth(args, cam_info, resolution):
     prior_dir = _resolve_prior_dir(args.source_path, args.mono_depth_dir)
     path, tried = _find_prior_file(
@@ -157,16 +169,12 @@ def _load_mono_normal(args, cam_info, resolution):
         if normal is None:
             return None
         normal = cv2.cvtColor(normal, cv2.COLOR_BGR2RGB).astype(np.float32)
-        if normal.max() > 1.0:
-            normal = normal / 255.0 if normal.max() <= 255.0 else normal / 65535.0
-    normal = np.nan_to_num(normal, nan=0.0, posinf=0.0, neginf=0.0)
+    normal = _decode_normal_range(normal)
     normal = torch.from_numpy(normal).float()
     if normal.ndim == 3 and normal.shape[-1] == 3:
         normal = normal.permute(2, 0, 1)
     if normal.ndim != 3 or normal.shape[0] != 3:
         return None
-    if normal.min() >= 0.0 and normal.max() <= 1.0:
-        normal = normal * 2.0 - 1.0
     normal = torch.nn.functional.interpolate(normal[None], size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)[0]
     order = getattr(args, "mono_normal_order", "xyz").lower()
     order_map = {"x": 0, "y": 1, "z": 2}
