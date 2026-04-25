@@ -168,6 +168,12 @@ def _load_mono_normal(args, cam_info, resolution):
     if normal.min() >= 0.0 and normal.max() <= 1.0:
         normal = normal * 2.0 - 1.0
     normal = torch.nn.functional.interpolate(normal[None], size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)[0]
+    order = getattr(args, "mono_normal_order", "xyz").lower()
+    order_map = {"x": 0, "y": 1, "z": 2}
+    if len(order) == 3 and sorted(order) == ["x", "y", "z"]:
+        normal = normal[[order_map[axis] for axis in order]]
+    else:
+        print(f"[MonoPrior][warning normal] Invalid mono_normal_order={order}, fallback to xyz")
     if args.mono_normal_flip_x:
         normal[0] = -normal[0]
     if args.mono_normal_flip_y:

@@ -63,6 +63,7 @@ class ModelParams(ParamGroup):
         self._images = "images"
         self.mono_depth_dir = ""
         self.mono_normal_dir = ""
+        self.mono_normal_order = "xyz"
         self.mono_normal_flip_x = False
         self.mono_normal_flip_y = False
         self.mono_normal_flip_z = False

@@ -431,6 +431,43 @@ def _colorize_residual_map(value, valid_mask):
     residual[2][invalid[0]] = 0.0
     return residual
 
+def _suggest_normal_transform(render_normal, mono_normal, valid_mask):
+    perms = {
+        "xyz": [0, 1, 2],
+        "xzy": [0, 2, 1],
+        "yxz": [1, 0, 2],
+        "yzx": [1, 2, 0],
+        "zxy": [2, 0, 1],
+        "zyx": [2, 1, 0],
+    }
+    signs = [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ]
+    render_normal = F.normalize(render_normal, dim=0, eps=1e-6)
+    best = None
+    for order, indices in perms.items():
+        candidate = mono_normal[indices].clone()
+        for flips in signs:
+            transformed = candidate.clone()
+            for axis, should_flip in enumerate(flips):
+                if should_flip:
+                    transformed[axis] = -transformed[axis]
+            transformed = F.normalize(transformed, dim=0, eps=1e-6)
+            cosine = (render_normal * transformed).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+            if valid_mask.sum().item() == 0:
+                continue
+            loss = (1.0 - cosine)[valid_mask].mean().item()
+            if best is None or loss < best[0]:
+                best = (loss, order, flips)
+    return best
+
 def _normalize_for_debug(value, valid_mask):
     value = value.detach()
     valid_mask = valid_mask & torch.isfinite(value)
@@ -472,6 +509,18 @@ def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
         mono_normal = F.normalize(viewpoint_cam.mono_normal.cuda(), dim=0, eps=1e-6)
         render_normal = F.normalize(render_pkg["rend_normal"].detach(), dim=0, eps=1e-6)
         normal_diff = 1.0 - (render_normal * mono_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+        best = _suggest_normal_transform(render_normal, mono_normal, valid)
+        if best is not None:
+            loss, order, flips = best
+            flip_args = []
+            for axis, should_flip in zip(("x", "y", "z"), flips):
+                if should_flip:
+                    flip_args.append(f"--mono_normal_flip_{axis}")
+            flip_text = " ".join(flip_args)
+            print(
+                f"[MonoPrior][normal debug] best transform for {viewpoint_cam.image_name}: "
+                f"--mono_normal_order {order} {flip_text} (mean angular loss {loss:.4f})"
+            )
         rows.extend([
             render_normal * 0.5 + 0.5,
             mono_normal * 0.5 + 0.5,
