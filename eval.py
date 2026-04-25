@@ -1,6 +1,8 @@
 import torch
 from scene import Scene
 import os, time
+import shlex
+import sys
 import numpy as np
 from tqdm import tqdm
 from os import makedirs
@@ -16,7 +18,7 @@ from utils.loss_utils import ssim
 from lpipsPyTorch import lpips
 from torchvision.utils import save_image, make_grid
 
-def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt):
+def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt, command=None):
     if save_ims:
         # Create directories to save rendered images
         render_path = os.path.join(model_path, "test", "renders")
@@ -65,6 +67,8 @@ def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt
         f"LPIPS: {lpip_v:.6f}\n"
         f"FPS: {fps:.6f}\n"
     )
+    if command:
+        result_text += f"Command: {command}\n"
     print(result_text.strip())
     makedirs(model_path, exist_ok=True)
     result_path = os.path.join(model_path, 'result.txt')
@@ -110,7 +114,7 @@ def render_set_train(model_path, views, gaussians, pipeline, background, save_im
             
 
    
-def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, save_ims: bool, op, indirect):
+def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, save_ims: bool, op, indirect, command=None):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -124,7 +128,7 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
 
         
         # render_set_train(dataset.model_path, scene.getTrainCameras(), gaussians, pipeline, background, save_ims, op)
-        render_set(dataset.model_path, scene.getTestCameras(), gaussians, pipeline, background, save_ims, op)
+        render_set(dataset.model_path, scene.getTestCameras(), gaussians, pipeline, background, save_ims, op, command)
         
         env_dict = gaussians.render_env_map()
         grid = [
@@ -155,4 +159,5 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images, op, not args.no_indirect)
+    command = "python " + " ".join(shlex.quote(arg) for arg in sys.argv)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.save_images, op, not args.no_indirect, command)

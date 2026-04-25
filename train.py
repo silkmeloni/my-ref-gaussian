@@ -12,6 +12,7 @@
 import os
 import torch
 import open3d as o3d
+import shlex
 from random import randint
 from utils.loss_utils import calculate_loss, l1_loss
 from gaussian_renderer import render_surfel, render_initial, render_volume, network_gui
@@ -290,6 +291,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             {"pipe": pipe, "bg_color": background, "opt": opt, "srgb": opt.srgb},
             model_path,
             (datetime.now() - training_start_time).total_seconds(),
+            get_command_line(),
         )
 
 
@@ -633,7 +635,7 @@ def evaluate_psnr(scene, renderFunc, renderkwargs):
     return psnr_test
 
 @torch.no_grad()
-def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path, train_time_seconds=None):
+def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path, train_time_seconds=None, command=None):
     views = scene.getTestCameras()
     if not views:
         print("No test cameras found, skipping final result.txt export.")
@@ -670,6 +672,8 @@ def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path, train
     )
     if train_time_seconds is not None:
         result_text += f"TrainTimeSeconds: {train_time_seconds:.2f}\n"
+    if command:
+        result_text += f"Command: {command}\n"
     os.makedirs(model_path, exist_ok=True)
     result_path = os.path.join(model_path, "result.txt")
     with open(result_path, "w") as f:
@@ -682,6 +686,10 @@ def evaluate_and_save_results(scene, renderFunc, renderkwargs, model_path, train
         f.write(metric_text)
     print(result_text.strip())
     print(f"Saved training-time evaluation results to {result_path}")
+
+
+def get_command_line():
+    return "python " + " ".join(shlex.quote(arg) for arg in sys.argv)
 
 
 
