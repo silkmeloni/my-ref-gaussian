@@ -14,7 +14,14 @@ import torch
 import open3d as o3d
 import shlex
 from random import randint
-from utils.loss_utils import calculate_loss, l1_loss, mono_depth_edge_weights, mono_normal_angle_valid
+from utils.loss_utils import (
+    calculate_loss,
+    l1_loss,
+    mono_depth_edge_weights,
+    mono_normal_angle_valid,
+    mv_material_reprojection_debug,
+    mv_material_reprojection_loss,
+)
 from gaussian_renderer import render_surfel, render_initial, render_volume, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -86,8 +93,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_depth_smooth_for_log = 0.0
     ema_mono_depth_for_log = 0.0
     ema_mono_normal_for_log = 0.0
+    ema_mv_material_for_log = 0.0
     ema_psnr_for_log = 0.0
     psnr_test = 0
+    mv_material_neighbors = build_mv_material_neighbors(scene.getTrainCameras(), opt.mv_material_num_neighbors)
 
     progress_bar = tqdm(range(first_iter, TOT_ITER), desc="Training progress")
     first_iter += 1
@@ -151,6 +160,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         total_loss, tb_dict = calculate_loss(viewpoint_cam, gaussians, render_pkg, opt, iteration)
         dist_loss, normal_loss, loss, Ll1, normal_smooth_loss, depth_smooth_loss = tb_dict["loss_dist"], tb_dict["loss_normal_render_depth"], tb_dict["loss0"], tb_dict["loss_l1"], tb_dict["loss_normal_smooth"], tb_dict["loss_depth_smooth"] 
         mono_depth_loss, mono_normal_loss = tb_dict["loss_mono_depth"], tb_dict["loss_mono_normal"]
+        mv_material_loss = torch.zeros_like(total_loss)
+        mv_material_debug = None
+        target_cam = None
+        target_render_pkg = None
+        if use_mv_material_loss(opt, iteration):
+            target_cam = sample_mv_material_target(viewpoint_cam, mv_material_neighbors)
+            if target_cam is not None:
+                with torch.no_grad():
+                    target_render_pkg = render(target_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
+                mv_material_loss = mv_material_reprojection_loss(
+                    viewpoint_cam, target_cam, render_pkg, target_render_pkg, opt, total_loss
+                )
+                total_loss = total_loss + opt.lambda_mv_material * mv_material_loss
+                if should_save_mv_material_debug(opt, iteration, first_iter):
+                    mv_material_debug = mv_material_reprojection_debug(
+                        viewpoint_cam, target_cam, render_pkg, target_render_pkg, opt
+                    )
 
         def get_outside_msk():
             return None if not USE_ENV_SCOPE else torch.sum((gaussians.get_xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
@@ -177,6 +203,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_depth_smooth_for_log = 0.4 * depth_smooth_loss + 0.6 * ema_depth_smooth_for_log
             ema_mono_depth_for_log = 0.4 * mono_depth_loss + 0.6 * ema_mono_depth_for_log
             ema_mono_normal_for_log = 0.4 * mono_normal_loss + 0.6 * ema_mono_normal_for_log
+            ema_mv_material_for_log = 0.4 * mv_material_loss + 0.6 * ema_mv_material_for_log
             ema_psnr_for_log = 0.4 * psnr(image, gt_image).mean().double().item() + 0.6 * ema_psnr_for_log
             if iteration % TEST_INTERVAL == 0:
                 psnr_test = evaluate_psnr(scene, render, {"pipe": pipe, "bg_color": background, "opt": opt})
@@ -193,6 +220,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     loss_dict["MonoD"] = f"{ema_mono_depth_for_log:.{5}f}"
                 if opt.lambda_mono_normal > 0:
                     loss_dict["MonoN"] = f"{ema_mono_normal_for_log:.{5}f}"
+                if opt.lambda_mv_material > 0:
+                    loss_dict["MVM"] = f"{ema_mv_material_for_log:.{5}f}"
                 progress_bar.set_postfix(loss_dict)
                 progress_bar.update(10)
             if iteration == TOT_ITER:
@@ -203,10 +232,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/mono_depth_loss', ema_mono_depth_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/mono_normal_loss', ema_mono_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/mv_material_loss', ema_mv_material_for_log, iteration)
 
             if opt.mono_debug and opt.mono_debug_interval > 0 and (
                     iteration % opt.mono_debug_interval == 0 or iteration == first_iter + 1):
                 save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration)
+            if mv_material_debug is not None:
+                save_mv_material_debug(viewpoint_cam, target_cam, mv_material_debug, opt, iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end),
                             testing_iterations, scene, render, {"pipe": pipe, "bg_color": background, "opt":opt})
@@ -315,6 +347,40 @@ def select_render_method(iteration, opt, initial_stage):
         render = render_surfel
 
     return render
+
+def build_mv_material_neighbors(cameras, num_neighbors):
+    if num_neighbors <= 0 or len(cameras) < 2:
+        return {}
+    centers = torch.stack([cam.camera_center.detach() for cam in cameras], dim=0)
+    dists = torch.cdist(centers, centers)
+    neighbor_count = min(num_neighbors + 1, len(cameras))
+    nearest = torch.topk(dists, k=neighbor_count, largest=False).indices.detach().cpu().tolist()
+    neighbors = {}
+    for cam, indices in zip(cameras, nearest):
+        cam_neighbors = [cameras[idx] for idx in indices if cameras[idx] is not cam]
+        neighbors[id(cam)] = cam_neighbors[:num_neighbors]
+    return neighbors
+
+def sample_mv_material_target(source_camera, mv_material_neighbors):
+    candidates = mv_material_neighbors.get(id(source_camera), [])
+    if not candidates:
+        return None
+    return candidates[randint(0, len(candidates) - 1)]
+
+def use_mv_material_loss(opt, iteration):
+    return (
+        opt.lambda_mv_material > 0
+        and opt.mv_material_from_iter <= iteration < opt.mv_material_until_iter
+        and opt.mv_material_interval > 0
+        and iteration % opt.mv_material_interval == 0
+    )
+
+def should_save_mv_material_debug(opt, iteration, first_iter):
+    return (
+        opt.mv_material_debug
+        and opt.mv_material_debug_interval > 0
+        and (iteration % opt.mv_material_debug_interval == 0 or iteration == first_iter + 1)
+    )
 
 
 def set_gaussian_para(gaussians, opt, vol=False):
@@ -441,6 +507,72 @@ def _visualize_weight_map(weights, valid_mask):
     weights[2][invalid[0]] = 0.0
     return weights
 
+def _scatter_mv_material_map(values, flat_idx, valid, height, width, channels=None, invalid_red=True):
+    if channels is None:
+        channels = values.shape[0]
+    out = torch.zeros((channels, height * width), dtype=values.dtype, device=values.device)
+    valid_flat = valid.reshape(-1)
+    if values.shape[0] == 1 and channels == 3:
+        values = values.repeat(3, 1)
+    out[:, flat_idx] = values[:channels].detach().clamp(0.0, 1.0)
+    out = out.reshape(channels, height, width)
+    if invalid_red:
+        valid_img = torch.zeros((1, height * width), dtype=torch.bool, device=values.device)
+        valid_img[:, flat_idx] = valid_flat[None]
+        valid_img = valid_img.reshape(1, height, width)
+        out[0][~valid_img[0]] = 1.0
+        out[1][~valid_img[0]] = 0.0
+        out[2][~valid_img[0]] = 0.0
+    return out
+
+def save_mv_material_debug(source_cam, target_cam, debug_data, opt, iteration):
+    height = debug_data["height"]
+    width = debug_data["width"]
+    flat_idx = debug_data["flat_idx"]
+    valid = debug_data["valid"]
+    source = debug_data["source_material"]
+    target = debug_data["target_material"]
+
+    valid_map = torch.zeros((1, height * width), dtype=torch.float32, device=valid.device)
+    valid_map[:, flat_idx] = valid.float()
+    valid_map = valid_map.reshape(1, height, width).repeat(3, 1, 1)
+
+    albedo_src = _scatter_mv_material_map(source["albedo"], flat_idx, valid, height, width)
+    albedo_tgt = _scatter_mv_material_map(target["albedo"], flat_idx, valid, height, width)
+    albedo_res = _scatter_mv_material_map((source["albedo"] - target["albedo"]).abs(), flat_idx, valid, height, width)
+
+    rough_src = _scatter_mv_material_map(source["roughness"], flat_idx, valid, height, width, channels=3)
+    rough_tgt = _scatter_mv_material_map(target["roughness"], flat_idx, valid, height, width, channels=3)
+    rough_res = _scatter_mv_material_map((source["roughness"] - target["roughness"]).abs(), flat_idx, valid, height, width, channels=3)
+
+    refl_src = _scatter_mv_material_map(source["refl"], flat_idx, valid, height, width, channels=3)
+    refl_tgt = _scatter_mv_material_map(target["refl"], flat_idx, valid, height, width, channels=3)
+    refl_res = _scatter_mv_material_map((source["refl"] - target["refl"]).abs(), flat_idx, valid, height, width, channels=3)
+
+    rows = [
+        source_cam.original_image.cuda(),
+        target_cam.original_image.cuda(),
+        valid_map,
+        albedo_src,
+        albedo_tgt,
+        albedo_res,
+        rough_src,
+        rough_tgt,
+        rough_res,
+        refl_src,
+        refl_tgt,
+        refl_res,
+    ]
+    grid = make_grid(torch.stack(rows, dim=0), nrow=3)
+    scale = max(grid.shape[-2] / 900, 1.0)
+    if scale > 1.0:
+        grid = F.interpolate(grid[None], (int(grid.shape[-2] / scale), int(grid.shape[-1] / scale)))[0]
+    os.makedirs(args.mv_material_debug_path, exist_ok=True)
+    save_image(
+        grid,
+        os.path.join(args.mv_material_debug_path, f"{iteration:06d}_{source_cam.image_name}_to_{target_cam.image_name}.png")
+    )
+
 def _suggest_normal_transform(render_normal, mono_normal, valid_mask):
     perms = {
         "xyz": [0, 1, 2],
@@ -558,12 +690,16 @@ def prepare_output_and_logger():
         cfg_log_f.write(str(Namespace(**vars(args))))
     args.visualize_path = os.path.join(args.model_path, "visualize")
     args.mono_debug_path = os.path.join(args.model_path, "prior_debug")
+    args.mv_material_debug_path = os.path.join(args.model_path, "mv_material_debug")
     
     os.makedirs(args.visualize_path, exist_ok=True)
     print("Visualization folder: {}".format(args.visualize_path))
     if args.mono_debug:
         os.makedirs(args.mono_debug_path, exist_ok=True)
         print("Mono prior debug folder: {}".format(args.mono_debug_path))
+    if args.mv_material_debug:
+        os.makedirs(args.mv_material_debug_path, exist_ok=True)
+        print("MV material debug folder: {}".format(args.mv_material_debug_path))
     
     # Create Tensorboard writer
     tb_writer = None

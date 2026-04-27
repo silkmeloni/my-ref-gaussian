@@ -147,6 +147,19 @@ class OptimizationParams(ParamGroup):
         self.mono_depth_edge_mask_sigma = 1.0
         self.mono_normal_angle_mask = False
         self.mono_normal_angle_thr = 60.0
+        self.lambda_mv_material = 0.0
+        self.mv_material_from_iter = 5000
+        self.mv_material_until_iter = 25000
+        self.mv_material_interval = 1
+        self.mv_material_num_neighbors = 4
+        self.mv_material_max_pixels = 8192
+        self.mv_material_depth_thr = 0.02
+        self.mv_material_alpha_thr = 0.1
+        self.mv_material_w_albedo = 1.0
+        self.mv_material_w_roughness = 0.2
+        self.mv_material_w_refl = 0.2
+        self.mv_material_debug = False
+        self.mv_material_debug_interval = 1000
         self.mono_debug = False
         self.mono_debug_interval = 1000
 

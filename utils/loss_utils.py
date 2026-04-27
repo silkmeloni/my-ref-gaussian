@@ -154,6 +154,134 @@ def mono_normal_angle_valid(cosine, valid, opt):
     cos_threshold = cos(radians(threshold))
     return valid & (cosine.detach() >= cos_threshold)
 
+def _camera_intrinsics_from_projection(viewpoint_camera):
+    width = viewpoint_camera.image_width
+    height = viewpoint_camera.image_height
+    c2w = (viewpoint_camera.world_view_transform.T).inverse()
+    ndc2pix = torch.tensor([
+        [width / 2, 0, 0, width / 2],
+        [0, height / 2, 0, height / 2],
+        [0, 0, 0, 1],
+    ], dtype=torch.float32, device="cuda").T
+    projection_matrix = c2w.T @ viewpoint_camera.full_proj_transform
+    return (projection_matrix @ ndc2pix)[:3, :3].T
+
+def _unproject_pixels(viewpoint_camera, xs, ys, depths):
+    c2w = (viewpoint_camera.world_view_transform.T).inverse()
+    intrins = _camera_intrinsics_from_projection(viewpoint_camera)
+    pixels = torch.stack([xs.float(), ys.float(), torch.ones_like(xs, dtype=torch.float32)], dim=-1)
+    rays_d = pixels @ intrins.inverse().T @ c2w[:3, :3].T
+    rays_o = c2w[:3, 3]
+    return depths[:, None] * rays_d + rays_o
+
+def _project_points(viewpoint_camera, points):
+    points_h = torch.cat([points, torch.ones_like(points[:, :1])], dim=-1)
+    projected = points_h @ viewpoint_camera.full_proj_transform
+    z = projected[:, 3:4]
+    grid = projected[:, :2] / z.clamp_min(1e-6)
+    return grid, z
+
+def _sample_map(image, grid):
+    return F.grid_sample(
+        image.detach()[None],
+        grid[None, :, None, :],
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )[0, :, :, 0]
+
+def _source_material_values(render_pkg, flat_idx):
+    return {
+        "albedo": render_pkg["base_color_map"].flatten(1)[:, flat_idx],
+        "roughness": render_pkg["roughness_map"].flatten(1)[:, flat_idx],
+        "refl": render_pkg["refl_strength_map"].flatten(1)[:, flat_idx],
+    }
+
+def _target_material_values(render_pkg, grid):
+    return {
+        "albedo": _sample_map(render_pkg["base_color_map"], grid),
+        "roughness": _sample_map(render_pkg["roughness_map"], grid),
+        "refl": _sample_map(render_pkg["refl_strength_map"], grid),
+    }
+
+def _mv_material_reprojection_data(source_camera, target_camera, source_pkg, target_pkg, opt):
+    required = ("base_color_map", "roughness_map", "refl_strength_map", "surf_depth", "rend_alpha")
+    if any(key not in source_pkg for key in required) or any(key not in target_pkg for key in required):
+        return None
+
+    source_depth = source_pkg["surf_depth"].detach()
+    source_alpha = source_pkg["rend_alpha"].detach()
+    height, width = source_depth.shape[-2:]
+    source_valid = torch.isfinite(source_depth) & (source_depth > 0) & (source_alpha > opt.mv_material_alpha_thr)
+    if getattr(source_camera, "gt_alpha_mask", None) is not None:
+        source_valid = source_valid & (source_camera.gt_alpha_mask.to(source_depth.device) > opt.mv_material_alpha_thr)
+
+    flat_valid = source_valid.reshape(-1).nonzero(as_tuple=False).flatten()
+    if flat_valid.numel() < opt.mono_prior_min_pixels:
+        return None
+
+    max_pixels = int(getattr(opt, "mv_material_max_pixels", 8192))
+    if max_pixels > 0 and flat_valid.numel() > max_pixels:
+        flat_valid = flat_valid[torch.randperm(flat_valid.numel(), device=flat_valid.device)[:max_pixels]]
+
+    ys = torch.div(flat_valid, width, rounding_mode="floor")
+    xs = flat_valid - ys * width
+    depths = source_depth.reshape(-1)[flat_valid]
+    points = _unproject_pixels(source_camera, xs, ys, depths)
+    grid, target_z = _project_points(target_camera, points)
+
+    in_bounds = (
+        (grid[:, 0] > -1.0) & (grid[:, 0] < 1.0) &
+        (grid[:, 1] > -1.0) & (grid[:, 1] < 1.0) &
+        (target_z[:, 0] > target_camera.znear)
+    )
+
+    target_alpha = _sample_map(target_pkg["rend_alpha"], grid)
+    target_depth = _sample_map(target_pkg["surf_depth"], grid)
+    target_alpha = target_alpha[:1]
+    target_depth = target_depth[:1]
+    depth_error = (target_depth - target_z.T).abs()
+    depth_scale = torch.maximum(target_depth.abs(), target_z.T.abs()).clamp_min(1e-6)
+    visible = (depth_error / depth_scale) < opt.mv_material_depth_thr
+    valid = in_bounds[None] & torch.isfinite(target_depth) & (target_depth > 0) & (target_alpha > opt.mv_material_alpha_thr) & visible
+
+    if valid.sum().item() < opt.mono_prior_min_pixels:
+        return None
+
+    return {
+        "height": height,
+        "width": width,
+        "flat_idx": flat_valid,
+        "valid": valid,
+        "source_material": _source_material_values(source_pkg, flat_valid),
+        "target_material": _target_material_values(target_pkg, grid),
+        "target_grid": grid,
+        "source_valid_map": source_valid,
+    }
+
+def mv_material_reprojection_debug(source_camera, target_camera, source_pkg, target_pkg, opt):
+    return _mv_material_reprojection_data(source_camera, target_camera, source_pkg, target_pkg, opt)
+
+def mv_material_reprojection_loss(source_camera, target_camera, source_pkg, target_pkg, opt, loss_ref):
+    reproj = _mv_material_reprojection_data(source_camera, target_camera, source_pkg, target_pkg, opt)
+    if reproj is None:
+        return torch.zeros_like(loss_ref)
+
+    valid = reproj["valid"]
+    source_material = reproj["source_material"]
+    target_material = reproj["target_material"]
+    loss_terms = []
+    if opt.mv_material_w_albedo > 0:
+        loss_terms.append(opt.mv_material_w_albedo * (source_material["albedo"] - target_material["albedo"]).abs()[valid.expand_as(source_material["albedo"])].mean())
+    if opt.mv_material_w_roughness > 0:
+        loss_terms.append(opt.mv_material_w_roughness * (source_material["roughness"] - target_material["roughness"]).abs()[valid].mean())
+    if opt.mv_material_w_refl > 0:
+        loss_terms.append(opt.mv_material_w_refl * (source_material["refl"] - target_material["refl"]).abs()[valid].mean())
+
+    if not loss_terms:
+        return torch.zeros_like(loss_ref)
+    return sum(loss_terms)
+
 def _mono_depth_loss(rendered_depth, mono_depth, opacity, opt, loss_ref, gt_alpha_mask=None):
     if mono_depth is None:
         return torch.zeros_like(loss_ref), torch.zeros_like(loss_ref)
