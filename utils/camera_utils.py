@@ -80,13 +80,20 @@ def _find_prior_file(scene_path, prior_dir, image_path, image_name, extensions, 
     if not prior_dir:
         return None, []
     tried = []
+    search_dirs = [prior_dir]
+    image_dir = os.path.dirname(image_path)
+    if image_dir and image_dir not in search_dirs:
+        search_dirs.append(image_dir)
     for base in _prior_name_candidates(scene_path, image_path, image_name):
-        for suffix in suffixes:
-            for ext in extensions:
-                path = os.path.join(prior_dir, base + suffix + ext)
-                tried.append(path)
-                if os.path.exists(path):
-                    return path, tried
+        for current_dir in search_dirs:
+            for suffix in suffixes:
+                if current_dir == image_dir and suffix == "":
+                    continue
+                for ext in extensions:
+                    path = os.path.join(current_dir, base + suffix + ext)
+                    tried.append(path)
+                    if os.path.exists(path):
+                        return path, tried
     return None, tried
 
 def _resize_single_channel(tensor, resolution):
@@ -118,7 +125,8 @@ def _load_mono_depth(args, cam_info, resolution):
         prior_dir,
         cam_info.image_path,
         cam_info.image_name,
-        (".npy", ".png")
+        (".npy", ".png", ".tiff", ".tif"),
+        ("_disp", "")
     )
     _mono_debug_log(args, "depth", cam_info.image_path, prior_dir, path, tried)
     if path is None:
@@ -157,7 +165,7 @@ def _load_mono_normal(args, cam_info, resolution):
         prior_dir,
         cam_info.image_path,
         cam_info.image_name,
-        (".png", ".npy"),
+        (".png", ".npy", ".tiff", ".tif"),
         ("_normal", "")
     )
     _mono_debug_log(args, "normal", cam_info.image_path, prior_dir, path, tried)
