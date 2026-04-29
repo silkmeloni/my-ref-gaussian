@@ -159,15 +159,22 @@ def _load_mono_depth(args, cam_info, resolution):
     return _resize_single_channel(depth, resolution)
 
 def _load_mono_normal(args, cam_info, resolution):
-    prior_dir = _resolve_prior_dir(args.source_path, args.mono_normal_dir)
-    path, tried = _find_prior_file(
-        args.source_path,
-        prior_dir,
-        cam_info.image_path,
-        cam_info.image_name,
-        (".png", ".npy", ".tiff", ".tif"),
-        ("_normal", "")
-    )
+    if getattr(args, "mono_normal_gt_prior", False):
+        prior_dir = os.path.dirname(cam_info.image_path)
+        path = os.path.join(prior_dir, "normal.png")
+        tried = [path]
+        if not os.path.exists(path):
+            path = None
+    else:
+        prior_dir = _resolve_prior_dir(args.source_path, args.mono_normal_dir)
+        path, tried = _find_prior_file(
+            args.source_path,
+            prior_dir,
+            cam_info.image_path,
+            cam_info.image_name,
+            (".png", ".npy", ".tiff", ".tif"),
+            ("_normal", "")
+        )
     _mono_debug_log(args, "normal", cam_info.image_path, prior_dir, path, tried)
     if path is None:
         return None
@@ -254,7 +261,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         refl_msk = torch.tensor(refl_msk).permute(2,0,1).float()
     else: refl_msk = None
     mono_depth = _load_mono_depth(args, cam_info, resolution) if args.mono_depth_dir else None
-    mono_normal = _load_mono_normal(args, cam_info, resolution) if args.mono_normal_dir else None
+    mono_normal = _load_mono_normal(args, cam_info, resolution) if (args.mono_normal_dir or getattr(args, "mono_normal_gt_prior", False)) else None
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
