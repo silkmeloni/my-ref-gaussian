@@ -190,22 +190,29 @@ def _sample_map(image, grid):
         align_corners=True,
     )[0, :, :, 0]
 
-def _source_material_values(render_pkg, flat_idx):
+def _unpremultiply_render_map(render_pkg, key, alpha_thr):
+    return render_pkg[key] / render_pkg["rend_alpha"].detach().clamp_min(alpha_thr)
+
+def _normalized_render_normal(render_pkg, alpha_thr):
+    normal = render_pkg["rend_normal"] / render_pkg["rend_alpha"].detach().clamp_min(alpha_thr)
+    return F.normalize(normal, dim=0, eps=1e-6)
+
+def _source_material_values(render_pkg, flat_idx, opt):
     return {
-        "albedo": render_pkg["base_color_map"].flatten(1)[:, flat_idx],
-        "roughness": render_pkg["roughness_map"].flatten(1)[:, flat_idx],
-        "refl": render_pkg["refl_strength_map"].flatten(1)[:, flat_idx],
+        "albedo": _unpremultiply_render_map(render_pkg, "base_color_map", opt.mv_material_alpha_thr).flatten(1)[:, flat_idx],
+        "roughness": _unpremultiply_render_map(render_pkg, "roughness_map", opt.mv_material_alpha_thr).flatten(1)[:, flat_idx],
+        "refl": _unpremultiply_render_map(render_pkg, "refl_strength_map", opt.mv_material_alpha_thr).flatten(1)[:, flat_idx],
     }
 
-def _target_material_values(render_pkg, grid):
+def _target_material_values(render_pkg, grid, opt):
     return {
-        "albedo": _sample_map(render_pkg["base_color_map"], grid),
-        "roughness": _sample_map(render_pkg["roughness_map"], grid),
-        "refl": _sample_map(render_pkg["refl_strength_map"], grid),
+        "albedo": _sample_map(_unpremultiply_render_map(render_pkg, "base_color_map", opt.mv_material_alpha_thr), grid),
+        "roughness": _sample_map(_unpremultiply_render_map(render_pkg, "roughness_map", opt.mv_material_alpha_thr), grid),
+        "refl": _sample_map(_unpremultiply_render_map(render_pkg, "refl_strength_map", opt.mv_material_alpha_thr), grid),
     }
 
 def _mv_material_reprojection_data(source_camera, target_camera, source_pkg, target_pkg, opt):
-    required = ("base_color_map", "roughness_map", "refl_strength_map", "surf_depth", "rend_alpha")
+    required = ("base_color_map", "roughness_map", "refl_strength_map", "surf_depth", "rend_alpha", "rend_normal")
     if any(key not in source_pkg for key in required) or any(key not in target_pkg for key in required):
         return None
 
@@ -244,6 +251,13 @@ def _mv_material_reprojection_data(source_camera, target_camera, source_pkg, tar
     depth_scale = torch.maximum(target_depth.abs(), target_z.T.abs()).clamp_min(1e-6)
     visible = (depth_error / depth_scale) < opt.mv_material_depth_thr
     valid = in_bounds[None] & torch.isfinite(target_depth) & (target_depth > 0) & (target_alpha > opt.mv_material_alpha_thr) & visible
+    normal_thr = float(getattr(opt, "mv_material_normal_thr", 45.0))
+    if normal_thr > 0:
+        normal_thr = max(0.0, min(180.0, normal_thr))
+        source_normal = _normalized_render_normal(source_pkg, opt.mv_material_alpha_thr).flatten(1)[:, flat_valid]
+        target_normal = _sample_map(_normalized_render_normal(target_pkg, opt.mv_material_alpha_thr), grid)
+        normal_cosine = (source_normal.detach() * target_normal).sum(dim=0, keepdim=True).clamp(-1.0, 1.0)
+        valid = valid & (normal_cosine >= cos(radians(normal_thr)))
 
     if valid.sum().item() < opt.mono_prior_min_pixels:
         return None
@@ -253,8 +267,8 @@ def _mv_material_reprojection_data(source_camera, target_camera, source_pkg, tar
         "width": width,
         "flat_idx": flat_valid,
         "valid": valid,
-        "source_material": _source_material_values(source_pkg, flat_valid),
-        "target_material": _target_material_values(target_pkg, grid),
+        "source_material": _source_material_values(source_pkg, flat_valid, opt),
+        "target_material": _target_material_values(target_pkg, grid, opt),
         "target_grid": grid,
         "source_valid_map": source_valid,
     }

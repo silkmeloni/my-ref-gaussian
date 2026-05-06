@@ -370,6 +370,7 @@ def sample_mv_material_target(source_camera, mv_material_neighbors):
 def use_mv_material_loss(opt, iteration):
     return (
         opt.lambda_mv_material > 0
+        and iteration > opt.volume_render_until_iter
         and opt.mv_material_from_iter <= iteration < opt.mv_material_until_iter
         and opt.mv_material_interval > 0
         and iteration % opt.mv_material_interval == 0
