@@ -63,6 +63,10 @@ class ModelParams(ParamGroup):
         self._images = "images"
         self.mono_depth_dir = ""
         self.mono_normal_dir = ""
+        self.mono_render_prior_dir = ""
+        self.use_mono_render_prior = False
+        self.export_mono_render_prior = False
+        self.mono_render_prior_name = "render_prior"
         self.mono_normal_gt_prior = False
         self.mono_normal_order = "xyz"
         self.mono_normal_flip_x = False

@@ -39,6 +39,12 @@ def _resolve_prior_dir(scene_path, prior_dir):
 
     return scene_prior_dir
 
+def _resolve_render_prior_dir(args):
+    prior_dir = getattr(args, "mono_render_prior_dir", "")
+    if prior_dir:
+        return prior_dir if os.path.isabs(prior_dir) else os.path.join(args.model_path, prior_dir)
+    return os.path.join(args.model_path, getattr(args, "mono_render_prior_name", "render_prior"))
+
 _MONO_DEBUG_STATS = {}
 
 def _mono_debug_log(args, prior_type, image_path, prior_dir, prior_path, candidates):
@@ -119,7 +125,7 @@ def _apply_omnidata_to_opencv_axes(normal):
     return normal
 
 def _load_mono_depth(args, cam_info, resolution):
-    prior_dir = _resolve_prior_dir(args.source_path, args.mono_depth_dir)
+    prior_dir = _resolve_render_prior_dir(args) if getattr(args, "use_mono_render_prior", False) else _resolve_prior_dir(args.source_path, args.mono_depth_dir)
     path, tried = _find_prior_file(
         args.source_path,
         prior_dir,
@@ -159,7 +165,17 @@ def _load_mono_depth(args, cam_info, resolution):
     return _resize_single_channel(depth, resolution)
 
 def _load_mono_normal(args, cam_info, resolution):
-    if getattr(args, "mono_normal_gt_prior", False):
+    if getattr(args, "use_mono_render_prior", False):
+        prior_dir = _resolve_render_prior_dir(args)
+        path, tried = _find_prior_file(
+            args.source_path,
+            prior_dir,
+            cam_info.image_path,
+            cam_info.image_name,
+            (".npy", ".png", ".tiff", ".tif"),
+            ("_normal", "")
+        )
+    elif getattr(args, "mono_normal_gt_prior", False):
         prior_dir = os.path.dirname(cam_info.image_path)
         path = os.path.join(prior_dir, "normal.png")
         tried = [path]
@@ -189,7 +205,10 @@ def _load_mono_normal(args, cam_info, resolution):
         if normal is None:
             return None
         normal = cv2.cvtColor(normal, cv2.COLOR_BGR2RGB).astype(np.float32)
-    normal = _decode_normal_range(normal)
+    if not getattr(args, "use_mono_render_prior", False):
+        normal = _decode_normal_range(normal)
+    else:
+        normal = np.nan_to_num(normal.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     normal = torch.from_numpy(normal).float()
     if normal.ndim == 3 and normal.shape[-1] == 3:
         normal = normal.permute(2, 0, 1)
@@ -198,19 +217,20 @@ def _load_mono_normal(args, cam_info, resolution):
     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-6)
     normal = torch.nn.functional.interpolate(normal[None], size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)[0]
     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-6)
-    order = getattr(args, "mono_normal_order", "xyz").lower()
-    order_map = {"x": 0, "y": 1, "z": 2}
-    if len(order) == 3 and sorted(order) == ["x", "y", "z"]:
-        normal = normal[[order_map[axis] for axis in order]]
-    else:
-        print(f"[MonoPrior][warning normal] Invalid mono_normal_order={order}, fallback to xyz")
-    normal = _apply_omnidata_to_opencv_axes(normal)
-    if args.mono_normal_flip_x:
-        normal[0] = -normal[0]
-    if args.mono_normal_flip_y:
-        normal[1] = -normal[1]
-    if args.mono_normal_flip_z:
-        normal[2] = -normal[2]
+    if not getattr(args, "use_mono_render_prior", False):
+        order = getattr(args, "mono_normal_order", "xyz").lower()
+        order_map = {"x": 0, "y": 1, "z": 2}
+        if len(order) == 3 and sorted(order) == ["x", "y", "z"]:
+            normal = normal[[order_map[axis] for axis in order]]
+        else:
+            print(f"[MonoPrior][warning normal] Invalid mono_normal_order={order}, fallback to xyz")
+        normal = _apply_omnidata_to_opencv_axes(normal)
+        if args.mono_normal_flip_x:
+            normal[0] = -normal[0]
+        if args.mono_normal_flip_y:
+            normal[1] = -normal[1]
+        if args.mono_normal_flip_z:
+            normal[2] = -normal[2]
     return torch.nn.functional.normalize(normal, dim=0, eps=1e-6)
 
 def loadCam(args, id, cam_info, resolution_scale):
@@ -260,15 +280,15 @@ def loadCam(args, id, cam_info, resolution_scale):
         refl_msk = cv2.imread(refl_path) != 0 # max == 1
         refl_msk = torch.tensor(refl_msk).permute(2,0,1).float()
     else: refl_msk = None
-    mono_depth = _load_mono_depth(args, cam_info, resolution) if args.mono_depth_dir else None
-    mono_normal = _load_mono_normal(args, cam_info, resolution) if (args.mono_normal_dir or getattr(args, "mono_normal_gt_prior", False)) else None
+    mono_depth = _load_mono_depth(args, cam_info, resolution) if (args.mono_depth_dir or getattr(args, "use_mono_render_prior", False)) else None
+    mono_normal = _load_mono_normal(args, cam_info, resolution) if (args.mono_normal_dir or getattr(args, "mono_normal_gt_prior", False) or getattr(args, "use_mono_render_prior", False)) else None
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, 
                   data_device=args.data_device, HWK=HWK, gt_refl_mask=refl_msk,
-                  mono_depth=mono_depth, mono_normal=mono_normal)
+                  mono_depth=mono_depth, mono_normal=mono_normal, image_path=cam_info.image_path)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

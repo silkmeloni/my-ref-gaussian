@@ -19,7 +19,7 @@ class Camera(nn.Module):
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
                  data_device = "cuda", HWK = None, gt_refl_mask = None,
-                 mono_depth = None, mono_normal = None
+                 mono_depth = None, mono_normal = None, image_path = None
                  ):
         super(Camera, self).__init__()
 
@@ -30,6 +30,7 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.image_path = image_path
         self.refl_mask = gt_refl_mask
         self.mono_depth = mono_depth
         self.mono_normal = mono_normal

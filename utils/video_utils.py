@@ -52,7 +52,8 @@ def extend_cameras(cameras, num=6):
                 image_name=camera0.image_name, uid=camera0.uid,
                 data_device=camera0.data_device,
                 trans=(camera0.trans), scale=camera0.scale,
-                HWK=camera0.HWK, gt_refl_mask=camera0.refl_mask
+                HWK=camera0.HWK, gt_refl_mask=camera0.refl_mask,
+                image_path=getattr(camera0, "image_path", None)
             )
             cameras_extend.append(cam)
 

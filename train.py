@@ -325,6 +325,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             (datetime.now() - training_start_time).total_seconds(),
             get_command_line(),
         )
+    if dataset.export_mono_render_prior:
+        final_initial_stage = False
+        final_render = select_render_method(opt.iterations, opt, final_initial_stage)
+        export_mono_render_priors(scene, final_render, {"pipe": pipe, "bg_color": background, "opt": opt, "srgb": opt.srgb}, dataset)
 
 
 
@@ -620,6 +624,45 @@ def _normalize_for_debug(value, valid_mask):
     center = valid_values.median()
     scale = (valid_values - center).abs().mean().clamp_min(1e-6)
     return (value - center) / scale
+
+def _render_prior_output_dir(dataset):
+    prior_dir = dataset.mono_render_prior_dir
+    if prior_dir:
+        return prior_dir if os.path.isabs(prior_dir) else os.path.join(dataset.model_path, prior_dir)
+    return os.path.join(dataset.model_path, dataset.mono_render_prior_name)
+
+def _safe_prior_stem(viewpoint, source_path):
+    image_path = getattr(viewpoint, "image_path", None)
+    if image_path:
+        try:
+            rel_path = os.path.relpath(image_path, source_path)
+            stem = os.path.splitext(rel_path)[0]
+            return "_".join(part for part in stem.split(os.sep) if part and part != ".")
+        except ValueError:
+            pass
+    return viewpoint.image_name.replace(os.sep, "_").replace("/", "_").replace("\\", "_")
+
+@torch.no_grad()
+def export_mono_render_priors(scene, renderFunc, renderkwargs, dataset):
+    output_dir = _render_prior_output_dir(dataset)
+    os.makedirs(output_dir, exist_ok=True)
+    train_views = scene.getTrainCameras()
+    print(f"Exporting rendered mono priors to {output_dir}")
+    for viewpoint in tqdm(train_views, desc="Export rendered mono priors"):
+        render_pkg = renderFunc(viewpoint, scene.gaussians, **renderkwargs)
+        alpha = render_pkg["rend_alpha"].detach()
+        depth = render_pkg["surf_depth"].detach().clamp_min(1e-6)
+        disp = (1.0 / depth).squeeze(0)
+        normal = render_pkg["rend_normal"].detach() / alpha.clamp_min(1e-6)
+        normal = F.normalize(normal, dim=0, eps=1e-6)
+        if getattr(viewpoint, "gt_alpha_mask", None) is not None:
+            valid = viewpoint.gt_alpha_mask.to(disp.device) > 0.5
+            disp = torch.where(valid[0], disp, torch.zeros_like(disp))
+            normal = torch.where(valid.expand_as(normal), normal, torch.zeros_like(normal))
+        stem = _safe_prior_stem(viewpoint, dataset.source_path)
+        np.save(os.path.join(output_dir, f"{stem}_disp.npy"), disp.detach().cpu().numpy().astype(np.float32))
+        np.save(os.path.join(output_dir, f"{stem}_normal.npy"), normal.permute(1, 2, 0).detach().cpu().numpy().astype(np.float32))
+    print(f"Saved rendered mono priors for {len(train_views)} train views.")
 
 def save_mono_prior_debug(viewpoint_cam, render_pkg, opt, iteration):
     has_depth = getattr(viewpoint_cam, "mono_depth", None) is not None
